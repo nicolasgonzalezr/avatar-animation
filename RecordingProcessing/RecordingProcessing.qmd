@@ -1,0 +1,347 @@
+---
+title: "RecordingProcessing"
+format: html
+editor: visual
+---
+
+### Load libraries
+
+```{r}
+
+library(tidyverse)
+library(jsonlite)
+library(signal)
+```
+
+### Load data
+
+```{r}
+
+FaceLogRaw <- read_csv("treasure_hunters_2026-01-14.csv", 
+                       col_types = cols(.default = col_guess())
+)
+
+
+# FaceLogRaw is your tibble with columns:
+# session_code, participant_id, round_number, id_in_group, face_log (character JSON)
+
+# 1) Parse each JSON cell -> tibble (cols = channels; rows = frames within chunk)
+parse_face <- function(s) as_tibble(fromJSON(s, simplifyVector = TRUE))
+
+FaceLog <- FaceLogRaw %>%
+  mutate(data = map(facelog, parse_face)) %>%
+  select(-facelog) %>%
+  unnest(data) %>%
+  group_by(session_code, participant_id, round_number) %>%
+  arrange(session_code, participant_id, round_number, timestamp) %>%
+  mutate(timestamp=timestamp - min(timestamp)) %>%
+  ungroup
+
+```
+
+#### Take summary
+
+```{r}
+
+FaceLogSummary <- FaceLog %>%
+  group_by(session_code, participant_id, round_number) %>%
+  summarize(
+    end = which.max(timestamp),
+    frames = n(),
+    seconds = max(timestamp, na.rm=TRUE),
+#    mean = mean(eyeBlinkLeft + eyeBlinkRight, na.rm=TRUE)/2
+  ) %>%
+  ungroup %>%
+  mutate(
+    fps = frames/seconds,
+    end = cumsum(end),
+    start = end - frames + 1 
+  )
+  
+```
+
+### Blink Schedule
+
+```{r}
+
+threshold <- 0.35
+
+leftBlinkIndices <- which(FaceLog$eyeBlinkLeft >= threshold)
+
+rightBlinkIndices <- which(FaceLog$eyeBlinkRight >= threshold)
+
+# split into consecutive streaks
+left <- cumsum(c(1, diff(leftBlinkIndices) != 1))
+
+right <- cumsum(c(1, diff(rightBlinkIndices) != 1))
+
+leftSplit <- split(leftBlinkIndices, left)
+
+rightSplit <- split(rightBlinkIndices, right)
+
+leftPeaks <- c()
+
+rightPeaks <- c()
+
+for (i in leftSplit) {
+  
+  peakIndex <- which.max(FaceLog$eyeBlinkRight[i])
+  
+  leftPeaks <- c(leftPeaks, i[peakIndex])
+  
+}
+
+for (i in rightSplit) {
+  
+  peakIndex <- which.max(FaceLog$eyeBlinkRight[i])
+
+  rightPeaks <- c(rightPeaks, i[peakIndex])
+  
+}
+
+blinkMatches <- leftPeaks[leftPeaks %in% rightPeaks]
+
+for (i in 1:nrow(FaceLogSummary)) {
+  
+  start <- as.numeric(FaceLogSummary[i, "start"])
+  end <- as.numeric(FaceLogSummary[i, "end"])
+  
+  blinkSubset <- blinkMatches[blinkMatches >= start & blinkMatches <= end]
+  
+  blinkSchedule <- as.vector(FaceLog[["timestamp"]][blinkSubset])
+  
+  BlinkConnection <- file(paste0(i, ".BlinkData.bin"), "wb")
+  
+  writeBin(blinkSchedule, BlinkConnection, size=4, endian="little")
+  
+  close(BlinkConnection)
+
+}
+```
+
+### Smoothing filter
+
+#### Define Savitzky-Golay function
+
+```{r}
+
+# Circular function so the buffer can wrap around the end
+
+sg_circ <- function(x, p = 3, n = 21, m = 0, ts = 1) {
+  N <- length(x)
+  y <- sgolayfilt(rep(x, 3), p = p, n = n, m = m, ts = ts)
+  y[(N + 1):(2 * N)]
+}
+
+smooth_sg <- function(df, group, time, p = 3, n = 21, m = 0, ts = 1) {
+  exclude   <- c(group, time)
+  num_cols  <- names(df)[vapply(df, is.numeric, logical(1))]
+  targets   <- setdiff(num_cols, exclude)   # numeric cols except group/time
+
+  df %>%
+    arrange(across(all_of(c(group, time)))) %>%
+    group_by(across(all_of(group))) %>%
+    mutate(across(all_of(targets),
+                  ~ sg_circ(.x, p = p, n = n, m = m, ts = ts))) %>%
+    ungroup()
+}
+```
+
+#### Execute
+
+```{r}
+
+window <- 21
+
+polynomial <- 3
+
+FaceLogSmooth <- smooth_sg(
+  FaceLog,
+  group = c("session_code", "participant_id", "round_number"),
+  time  = "timestamp",
+  n = window, p = polynomial
+)
+```
+
+#### Blink Smoothing (Not used)
+
+```{r}
+
+FaceLog$eyeBlinkLeft[leftPeaks] <- 1
+FaceLog$eyeBlinkRight[rightPeaks] <- 1
+
+blinks <- FaceLog %>%
+  select(session_code, participant_id, round_number, timestamp,  eyeBlinkLeft, eyeBlinkRight) %>%
+  mutate(
+    eyeBlinkLeft = ifelse(eyeBlinkLeft >= 0.15, eyeBlinkLeft, 0),
+    eyeBlinkRight = ifelse(eyeBlinkRight >= 0.15, eyeBlinkRight, 0)
+  ) %>%
+  arrange(session_code, participant_id, round_number, timestamp) %>%
+  group_by(session_code, participant_id, round_number) %>%
+  mutate(
+    eyeBlinkLeft = sg_circ(eyeBlinkLeft, p=2, n = 3),
+    eyeBlinkRight = sg_circ(eyeBlinkRight, p=2, n = 3)
+  )
+  
+blinks$eyeBlinkLeft[leftPeaks] <- 1
+blinks$eyeBlinkRight[rightPeaks] <- 1
+
+```
+
+#### Test
+
+```{r}
+
+start <- as.numeric(FaceLogSummary[1, "start"])
+end <- as.numeric(FaceLogSummary[1, "end"])
+
+FaceLogCirc <- FaceLog[start:end,] %>%
+  mutate(timestamp=timestamp + max(timestamp, na.rm=TRUE)) %>%
+  rbind(FaceLog[start:end,])
+
+FaceSmoothCirc <- FaceLogSmooth[start:end,] %>%
+  mutate(timestamp=timestamp + max(timestamp, na.rm=TRUE)) %>%
+  rbind(FaceLogSmooth[start:end,])
+
+ggplot(FaceLog[start:end,], aes(x=timestamp, y=eyeBlinkLeft))+
+  geom_point(color="lightcoral")+
+  geom_point(data=blinks[start:end,], color="steelblue")+
+#  facet_wrap(~ session_code + participant_id + round_number)+
+  theme_minimal()
+```
+
+### Export
+
+#### Set Target Blendshapes
+
+```{r}
+
+MediaPipeBlendshapes <- c(
+  "_neutral",
+  "browDownLeft",
+  "browDownRight",
+  "browInnerUp",
+  "browOuterUpLeft",
+  "browOuterUpRight",
+  "cheekPuff",
+  "cheekSquintLeft",
+  "cheekSquintRight",
+  "eyeBlinkLeft",
+  "eyeBlinkRight",
+  "eyeLookDownLeft",
+  "eyeLookDownRight",
+  "eyeLookInLeft",
+  "eyeLookInRight",
+  "eyeLookOutLeft",
+  "eyeLookOutRight",
+  "eyeLookUpLeft",
+  "eyeLookUpRight",
+  "eyeSquintLeft",
+  "eyeSquintRight",
+  "eyeWideLeft",
+  "eyeWideRight",
+  "jawForward",
+  "jawLeft",
+  "jawOpen",
+  "jawRight",
+  "mouthClose",
+  "mouthDimpleLeft",
+  "mouthDimpleRight",
+  "mouthFrownLeft",
+  "mouthFrownRight",
+  "mouthFunnel",
+  "mouthLeft",
+  "mouthLowerDownLeft",
+  "mouthLowerDownRight",
+  "mouthPressLeft",
+  "mouthPressRight",
+  "mouthPucker",
+  "mouthRight",
+  "mouthRollLower",
+  "mouthRollUpper",
+  "mouthShrugLower",
+  "mouthShrugUpper",
+  "mouthSmileLeft",
+  "mouthSmileRight",
+  "mouthStretchLeft",
+  "mouthStretchRight",
+  "mouthUpperUpLeft",
+  "mouthUpperUpRight",
+  "noseSneerLeft",
+  "noseSneerRight"
+)
+
+TargetBlendshapes <- c(
+#  "eyeLookDownLeft",
+#  "eyeLookDownRight",
+  "eyeLookInLeft",
+  "eyeLookInRight",
+  "eyeLookOutLeft",
+  "eyeLookOutRight",
+  "eyeLookUpLeft",
+  "eyeLookUpRight",
+  "eyeWideLeft",
+  "eyeWideRight"
+)
+
+Quaternion <- c("x", "y", "z", "w")
+```
+
+#### Write
+
+```{r}
+
+HeadList <- list()
+
+HeadLog <- as.matrix(FaceLogSmooth[,Quaternion])
+
+EyeLog <- as.matrix(FaceLogSmooth[,TargetBlendshapes])
+
+EyeList <- list()
+
+TimeLog <- as.vector(FaceLogSmooth[["timestamp"]])
+
+TimeList <- list()
+
+for (i in 1:nrow(FaceLogSummary)) {
+  
+  EyeConnection <- file(paste0(i, ".EyeData.bin"), "wb")
+  
+  HeadConnection <- file(paste0(i, ".HeadData.bin"), "wb")
+  
+  TimeConnection <- file(paste0(i, ".TimeData.bin"), "wb")
+
+  start <- as.numeric(FaceLogSummary[i, "start"])
+  
+  end <- as.numeric(FaceLogSummary[i, "end"])
+  
+  HeadList[[i]] <- as.vector(t(
+    HeadLog[start:end,]
+  ))
+  
+  writeBin(as.vector(HeadList[[i]]), HeadConnection, size=4, endian="little")
+  
+  close(HeadConnection)
+  
+  EyeList[[i]] <- as.vector(t(
+    EyeLog[start:end,]
+  ))
+  
+  writeBin(as.vector(EyeList[[i]]), EyeConnection, size=4, endian="little")
+  
+  close(EyeConnection)
+  
+  TimeList[[i]] <- TimeLog[start:end]
+  
+  writeBin(as.vector(TimeList[[i]]), TimeConnection, size=4, endian="little")
+  
+  close(TimeConnection)
+  
+}
+
+# ---- 1) EyeHeader.json (names only) ----
+writeLines(
+  toJSON(list(order = TargetBlendshapes), auto_unbox = TRUE),
+  "EyeHeader.json"
+)
+```

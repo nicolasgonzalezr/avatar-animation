@@ -1,0 +1,326 @@
+---
+title: "Avatar Concession Schedule Generator"
+format: pdf
+editor: visual
+---
+
+```{r, include=FALSE}
+
+library(tidyverse)
+library(jsonlite)
+```
+
+### Parameters
+
+```{r}
+
+set.seed(8)
+
+timeout <- 60 # Bargain timeout (bargain window)
+
+n_star <- 23 # Expected number of concessions at timeout
+
+theta <- 0.2 # Ending (terminal) rate of concessions per second of bargaining
+
+# 0.2 = 5 seconds per step
+
+kappa <- 0.075 # Concession rate convergence speed
+
+```
+
+#### Get Starting Rate
+
+Get $Y_{0}$:
+
+$$
+Y_0 = \theta + \frac{\kappa(n^* - \theta T)}{1 - e^{-\kappa T}}
+$$
+
+```{r}
+
+# Starting rate of concessions per second of bargaining
+
+Y0 <- theta + (kappa*(n_star - (theta*timeout)))/(1 - exp(-(kappa*timeout)))
+
+Y0
+```
+
+### Define Rates
+
+Define rate as a function of time:
+
+$$
+\lambda(t) = \theta + (Y_0 - \theta)e^{-\kappa t}
+$$
+
+With CDF equal to the expected number of concessions at time t:
+
+$$
+\mathbb{E}[N_t] = \Lambda{(t)} = \int_0^t \lambda(s)\,ds= \theta t + \frac{Y_0 - \theta}{\kappa}(1 - e^{-\kappa t})
+$$
+
+```{r}
+
+lambda <- function(time) {
+  
+  theta + (Y0 - theta) * exp(-(kappa*time))
+  
+}
+
+LAMBDA <- function(time) {
+  
+  theta * time + ((Y0 - theta) / kappa) * (1 - exp(-kappa * time))
+  
+}
+
+# Verify expectations E(N_t) = n_star
+
+LAMBDA(timeout)
+
+LAMBDA(timeout) == n_star
+```
+
+### Define Theoretical Densities
+
+#### Define Segments
+
+```{r}
+
+# Split total time in equally spaced segments
+
+segments <- c()
+
+Nsegments <- 5
+
+for (i in 1:(Nsegments+1)) {
+  
+  segments[i] <- timeout / Nsegments * (i-1) 
+  
+}
+
+segments
+```
+
+#### Estimate Frequencies and Densities
+
+```{r}
+
+frequencies <- c()
+
+densities <- c()
+
+for (i in 1:length(segments[-1])) {
+  
+  frequencies[i] <- LAMBDA(segments[i+1]) - LAMBDA(segments[i]) 
+  
+  densities[i] <- frequencies[i] / LAMBDA(segments[length(segments)])
+
+}
+
+frequencies
+sum(frequencies)
+densities
+sum(densities)
+
+densitySD <- sqrt(densities*(1-densities)/n_star) # Binomial SD
+densitySD
+```
+
+```{r}
+
+# Calibrate absolute frequency deviations per segment (allowed ranges)
+
+scalingSD <- 0.6
+
+cat("Maximum allowed frequencies: ", frequencies + densitySD * n_star * scalingSD, "\n\n")
+
+cat("Expected frequencies: ", frequencies, "\n\n")
+
+cat("Minimum allowed frequencies: ", frequencies - densitySD * n_star * scalingSD, "\n\n")
+
+cat("Feasible upper: ", floor(frequencies + densitySD * n_star * scalingSD), "\n\n")
+
+cat("Feasible lower: ", ceiling(frequencies - densitySD * n_star * scalingSD), "\n\n")
+
+cat("Upper diff: ", floor(frequencies + densitySD * n_star * scalingSD) - frequencies, "\n\n")
+
+cat("Lower diff: ", frequencies - ceiling(frequencies - densitySD * n_star * scalingSD), "\n\n")
+```
+
+### Empirical
+
+```{r}
+
+get_empirical <- function(schedule, segments) { 
+
+  emprirical <- c()
+  
+  for (i in segments) {
+    density <- sum(schedule <= i) / length(schedule)
+    
+    emprirical <- c(emprirical, density)
+  }
+  
+  error <- abs(densities - diff(c(0, emprirical)))
+  
+  return(list(error=error, density=diff(c(0, emprirical))))
+}
+```
+
+### Draw Samples
+
+#### NHPP with Ogata Thinning
+
+Sample from a non-homogenous poisson process using Ogata thinning algorithm:
+
+```{r}
+
+rejectionCount <- 0 # Discarded draws, save for diagnostics
+
+scheduleList <- list()
+
+densityMatrix <- matrix(nrow=0, ncol=Nsegments) # Save for diagnostics
+
+# Get upper bound rate, include rate at time=0 in case rate is decreasing
+M <- max(lambda(timeout), lambda(0), theta)
+
+while (length(scheduleList) < 500) {
+  
+  t <- 0
+  
+  schedule <- c()
+  
+  while (t < timeout) {
+
+  interval <- rexp(1, rate=M)
+  
+  nextTime <- t + interval
+  
+  if (nextTime > timeout) break
+  
+  if (runif(1) <= lambda(nextTime)/M) {
+    
+    schedule <- c(schedule, nextTime)
+    
+  }
+  
+  t <- nextTime
+  
+  }
+  
+  # Add a random initial delay to avoid jumpy start to the bargain
+  
+  schedule <- schedule + runif(1, min=1.5, max=3)
+  
+  # Filter out of range draws (after adding extra initial delay)
+  
+  schedule <- schedule[schedule < timeout]
+  
+  # Filter draws that deviate from the theoretical density
+  
+  empirical <- get_empirical(schedule, segments[-1])
+  
+  distributionFilter <- sum(empirical$error > scalingSD*densitySD) == 0
+  
+  # Filter draws that deviate from the expected count (even split equilibrium ensurance)
+  
+  scheduleLengthFilter <- 20 < length(schedule) & length(schedule) < 26
+  
+  if (distributionFilter & scheduleLengthFilter) {
+
+    scheduleList[[length(scheduleList) + 1L]] <- schedule
+    
+    densityMatrix <- rbind(densityMatrix, empirical$density)
+    
+  } else {
+    
+    rejectionCount <- rejectionCount + 1
+    
+  }
+  
+}
+```
+
+```{r}
+
+#saveRDS(scheduleList, "ConcessionScheduleList.rds")
+```
+
+#### Check Output
+
+Check output is well behaved
+
+```{r}
+
+cat("Number of rejected draws: ", rejectionCount, "\n\n")
+
+cat("Theoretical densities: ", densities, "\n\n")
+
+cat("Empirical (mean) densities: ", colMeans(densityMatrix), "\n\n")
+
+cat("Theoretical SDs: ", densitySD, "\n\n")
+
+cat("Empirical SDs: ", apply(densityMatrix, 2, sd), "\n\n")
+
+cat("Empirical max: ", apply(densityMatrix, 2, max), "\n\n")
+
+cat("Empirical min: ", apply(densityMatrix, 2, min), "\n\n")
+
+cat("Empirical range: ", apply(densityMatrix, 2, max) - apply(densityMatrix, 2, min), "\n\n")
+
+
+
+evenSplitTime <- c()
+
+totalConcessions <- c()
+
+
+for (i in scheduleList) {
+  
+  evenSplitTime <- c(evenSplitTime, i[20])
+  
+  totalConcessions <- c(totalConcessions, length(i))
+  
+}
+
+cat("Even split time, Mean: ", mean(evenSplitTime), " SD: ", sd(evenSplitTime), " Max: ", max(evenSplitTime), " Min: ", min(evenSplitTime), "\n\n")
+
+cat("Total concessions, Mean: ", mean(totalConcessions), " SD: ", sd(totalConcessions), " Max: ", max(totalConcessions), " Min: ", min(totalConcessions))
+```
+
+```{r}
+
+df <- data.frame(EvenSplitTime = evenSplitTime, TotalConcessions = totalConcessions)
+
+ggplot(df, aes(x=EvenSplitTime))+
+  geom_histogram(bins=100, fill="springgreen4")+
+  theme_minimal()
+
+ggplot(df, aes(x=TotalConcessions))+
+  geom_histogram(bins=5, fill="steelblue")+
+  theme_minimal()
+```
+
+### Export to JSON
+
+```{r}
+
+# Quantize helper (~float32-ish precision in seconds)
+#q <- function(x, digits = 4) round(as.numeric(x), digits)
+
+#schedules_json <- lapply(seq_along(scheduleList), function(i) {
+#  list(
+#    totalConcessions = totalConcessions[i],
+#    timeToEquilibrium = evenSplitTime[i],
+#    timestamps = q(scheduleList[[i]], 4)  # e.g., 12.3456
+#  )
+#})
+
+#write_json(
+#  schedules_json,
+#  path = "ConcessionSchedules.json",
+#  auto_unbox = TRUE,
+#  pretty = FALSE
+#)
+
+```

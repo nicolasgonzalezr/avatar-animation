@@ -1,0 +1,30 @@
+
+Windows (PowerShell)
+
+# 1. Remove the old dependencies folder
+Remove-Item -Recurse -Force node_modules
+
+# 2. Install exactly what's in package-lock.json
+npm ci
+
+# 3. Build the project
+npx vite build
+
+
+
+macOS (Apple Silicon, Node 20)
+
+# 1. Use Node 20 for the session (installed via Homebrew)
+export PATH="/opt/homebrew/opt/node@20/bin:$PATH"
+
+# 2. Remove the old dependencies folder
+rm -rf node_modules
+
+# 3. Install exactly what's in package-lock.json
+npm ci
+
+# 4. Build the project
+npx vite build
+
+
+

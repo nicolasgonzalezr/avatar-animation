@@ -1,0 +1,15 @@
+node_modules/
+.Rproj.user
+*.RData
+*.Rproj
+*.Rhistory
+*.csv
+
+# Development variants
+/backups/
+/mainLiveFeed.js
+/RecordingProcessing/RecordingProcessingBlinks.qmd
+/RecordingProcessing/RecordingProcessing_files/
+/RecordingProcessing/On_Lewis_simulation_method_for_point_processes.pdf
+
+.DS_Store
