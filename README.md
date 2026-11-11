@@ -169,4 +169,4 @@ Third-party software and model assets retain their respective licenses and attri
 
 For questions about stimulus generation, animation behavior, or integration:
 
-**Nicolás González-Raposo** — nicgonzalezr@udd.cl
+**Nicolás González-Raposo** — nicgonzalezr@udd.cl · [ORCID](https://orcid.org/0000-0002-2723-0354)
