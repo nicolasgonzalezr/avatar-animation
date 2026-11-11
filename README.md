@@ -25,10 +25,10 @@ Both conditions include background motion and mild spontaneous smiling. An exper
   </tr>
   <tr>
     <td width="50%">
-      <video src="https://github.com/user-attachments/assets/5bfcc227-a54e-40de-b46e-f0c1b08a58bd" controls></video>
+      <video src="https://github.com/user-attachments/assets/c066b939-899b-4b8f-a042-0f68745a43d4" controls></video>
     </td>
     <td width="50%">
-      <video src="https://github.com/user-attachments/assets/277340ba-d1f9-424e-85d8-78474841b4fe" controls></video>
+      <video src="https://github.com/user-attachments/assets/94bd7b00-e7e8-4536-824b-f387e946aa72" controls></video>
     </td>
   </tr>
 </table>
